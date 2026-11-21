@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Navigasi Laluan Larian</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com" />
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body, html { height: 100%; width: 100%; overflow: hidden; }
+    #map { height: 100%; width: 100%; z-index: 1; }
+
+    /* Panel Status di Bahagian Atas */
+    .status-panel {
+      position: fixed; top: 12px; left: 12px; right: 12px; z-index: 1000;
+      background: #1e293b; color: #fff; padding: 14px 16px; border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: background 0.3s ease;
+    }
+    .status-panel.safe { background: #15803d; }
+    .status-panel.danger { background: #dc2626; animation: pulse 1s infinite; }
+    .status-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .status-sub { font-size: 13px; opacity: 0.9; margin-top: 4px; }
+
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.02); }
+      100% { transform: scale(1); }
+    }
+
+    /* Panel Kawalan di Bahagian Bawah */
+    .control-panel {
+      position: fixed; bottom: 20px; left: 12px; right: 12px; z-index: 1000;
+      display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+    }
+    button {
+      border: none; padding: 12px 16px; border-radius: 10px; font-weight: 600;
+      font-size: 14px; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+    }
+    .btn-start { background: #2563eb; color: white; flex: 1; }
+    .btn-center { background: #ffffff; color: #0f172a; }
+    .btn-sim { background: #f59e0b; color: #0f172a; font-size: 12px; }
+
+    /* Penanda Lokasi Peserta (Titik Biru) */
+    .runner-dot {
+      width: 18px; height: 18px; background: #2563eb; border: 3px solid #ffffff;
+      border-radius: 50%; box-shadow: 0 0 12px rgba(37, 99, 235, 0.9);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Paparan Status Navigasi -->
+  <div id="statusPanel" class="status-panel">
+    <div class="status-title" id="statusTitle">📍 Sedia untuk Mula</div>
+    <div class="status-sub" id="statusSub">Tekan "Mula Navigasi" untuk aktifkan GPS & suara.</div>
+  </div>
+
+  <!-- Peta -->
+  <div id="map"></div>
+
+  <!-- Butang Kawalan -->
+  <div class="control-panel">
+    <button class="btn-start" id="btnStart" onclick="startNavigation()">▶ Mula Navigasi</button>
+    <button class="btn-center" onclick="centerOnUser()">🎯 Lokasi Saya</button>
+    <button class="btn-sim" onclick="simulateOffRoute()">🧪 Uji Keluar Laluan</button>
+  </div>
+
+  <!-- Leaflet JS & Turf.js -->
+  <script src="https://unpkg.com"></script>
+  <script src="https://unpkg.com"></script>
+
+  <script>
+    // ==========================================
+    // 1. TAMPAL (PASTE) KOD DARI GEOJSON.IO DI SINI
+    // Gantikan dari tanda { selepas = sehingga tanda }; sebelum bahagian 2
+    // ==========================================
+    const raceRouteGeoJSON = {
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {},
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            100.7312301,
+            4.8181648
+          ],
+          [
+            100.7298861,
+            4.8176768
+          ],
+          [
+            100.7297302,
+            4.8177162
+          ],
+          [
+            100.7298598,
+            4.818016
+          ],
+          [
+            100.7316188,
+            4.818644
+          ],
+          [
+            100.7315249,
+            4.8188843
+          ],
+          [
+            100.7322048,
+            4.8191573
+          ],
+          [
+            100.7325735,
+            4.8187022
+          ],
+          [
+            100.7312746,
+            4.8181798
+          ],
+          [
+            100.7333007,
+            4.8189416
+          ]
+        ]
+      }
+    }
+  ]
+}
+
+    // ==========================================
+    // 2. TETAPAN & PEMBOLEH UBAH SISTEM
+    // ==========================================
+    const MAX_OFF_ROUTE_METERS = 25; // Had jarak tersasar (dalam meter)
+    let map, userMarker, routeLineFeature = null;
+    let userCoords = null, autoFollow = true;
+    let lastAlertTime = 0, wakeLock = null;
+
+    // ==========================================
+    // 3. INISIALISASI PETA
+    // ==========================================
+    function initMap() {
+      map = L.map('map', { zoomControl: false }).setView([4.8510, 100.7535], 16);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap'
+      }).addTo(map);
+
+      // Lukis keseluruhan FeatureCollection (garisan & pin jika ada) daripada geojson.io
+      const routeLayer = L.geoJSON(raceRouteGeoJSON, {
+        style: { color: '#2563eb', weight: 7, opacity: 0.85 },
+        onEachFeature: function (feature, layer) {
+          if (feature.properties && feature.properties.name) {
+            layer.bindPopup(`<b>${feature.properties.name}</b>`);
+          }
+        }
+      }).addTo(map);
+
+      // Cari objek garisan (LineString) untuk pengiraan jarak Turf.js
+      if (raceRouteGeoJSON.type === "FeatureCollection") {
+        routeLineFeature = raceRouteGeoJSON.features.find(
+          f => f.geometry && (f.geometry.type === "LineString" || f.geometry.type === "MultiLineString")
+        );
+      } else if (raceRouteGeoJSON.type === "Feature") {
+        routeLineFeature = raceRouteGeoJSON;
+      }
+
+      // Fokuskan peta secara automatik pada laluan anda
+      if (routeLayer.getBounds().isValid()) {
+        map.fitBounds(routeLayer.getBounds(), { padding: [40, 40] });
+      }
+
+      // Nyahaktif auto-follow jika pengguna menggerakkan peta secara manual
+      map.on('dragstart', () => { autoFollow = false; });
+    }
+
+    // ==========================================
+    // 4. MULA NAVIGASI & GPS REAL-TIME
+    // ==========================================
+    async function startNavigation() {
+      if (!("geolocation" in navigator)) {
+        alert("Pelayar web anda tidak menyokong GPS.");
+        return;
+      }
+
+      document.getElementById('btnStart').innerText = "🟢 Navigasi Aktif";
+      speak("Navigasi larian dimulakan. Sila ikut garisan biru di atas peta.");
+
+      // Pastikan skrin telefon kekal menyala (Screen Wake Lock)
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (err) {
+        console.log("Wake Lock tidak disokong:", err);
+      }
+
+      // Jejak lokasi GPS secara berterusan
+      navigator.geolocation.watchPosition(
+        (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          const accuracy = Math.round(position.coords.accuracy);
+          updateRunnerPosition(lat, lng, accuracy);
+        },
+        (error) => {
+          updateStatus("danger", "⚠️ Ralat GPS", "Sila pastikan GPS / Location telefon diaktifkan.");
+        },
+        { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+      );
+    }
+
+    // ==========================================
+    // 5. KEMASKINI KEDUDUKAN & SEMAK LALUAN (TURF.JS)
+    // ==========================================
+    function updateRunnerPosition(lat, lng, accuracy = 10) {
+      userCoords = [lat, lng];
+
+      if (!userMarker) {
+        const icon = L.divIcon({ className: 'runner-dot', iconSize: [18, 18] });
+        userMarker = L.marker(userCoords, { icon: icon }).addTo(map);
+      } else {
+        userMarker.setLatLng(userCoords);
+      }
+
+      if (autoFollow) {
+        map.setView(userCoords, 17);
+      }
+
+      if (!routeLineFeature) {
+        updateStatus("danger", "⚠️ Tiada Garisan Laluan", "Pastikan anda melukis garisan (LineString) di geojson.io.");
+        return;
+      }
+
+      // Kira jarak terdekat peserta dari garisan laluan (dalam meter)
+      const pt = turf.point([lng, lat]);
+      const distanceMeters = Math.round(
+        turf.pointToLineDistance(pt, routeLineFeature, { units: 'meters' })
+      );
+
+      if (distanceMeters > MAX_OFF_ROUTE_METERS) {
+        // TERKELUAR DARI LALUAN
+        updateStatus(
+          "danger",
+          "🚨 AMARAN: ANDA TERSALAH LALUAN!",
+          `Anda berada ${distanceMeters} meter dari laluan rasmi. Sila patah balik!`
+        );
+        triggerOffRouteAlert();
+      } else {
+        // DI ATAS LALUAN YANG BETUL
+        updateStatus(
+          "safe",
+          "✅ Di Atas Laluan Rasmi",
+          `Jarak dari garisan: ${distanceMeters}m • Ketepatan GPS: ±${accuracy}m`
+        );
+      }
+    }
+
+    // ==========================================
+    // 6. AMARAN SUARA & GETARAN
+    // ==========================================
+    function triggerOffRouteAlert() {
+      const now = Date.now();
+      if (now - lastAlertTime > 8000) {
+        lastAlertTime = now;
+        if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+        speak("Amaran! Anda telah terkeluar dari laluan larian. Sila patah balik ke garisan biru.");
+      }
+    }
+
+    function speak(text) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'ms-MY';
+        utterance.rate = 1.05;
+        window.speechSynthesis.speak(utterance);
+      }
+    }
+
+    function updateStatus(type, title, sub) {
+      const panel = document.getElementById('statusPanel');
+      panel.className = `status-panel ${type}`;
+      document.getElementById('statusTitle').innerText = title;
+      document.getElementById('statusSub').innerText = sub;
+    }
+
+    function centerOnUser() {
+      autoFollow = true;
+      if (userCoords) map.setView(userCoords, 17);
+    }
+
+    // Fungsi ujian untuk simulasi terkeluar laluan dari rumah
+    function simulateOffRoute() {
+      autoFollow = true;
+      updateRunnerPosition(4.8600, 100.7650, 5);
+    }
+
+    initMap();
+  </script>
+</body>
+</html>
