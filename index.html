@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Navigasi Laluan Larian</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+    body, html { height: 100%; width: 100%; overflow: hidden; background: #e2e8f0; touch-action: none; }
+    #tileLayer, #routeCanvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+    #tileLayer { z-index: 1; pointer-events: none; }
+    #tileLayer img { position: absolute; width: 256px; height: 256px; user-select: none; }
+    #routeCanvas { z-index: 2; }
+    .status-panel { position: fixed; top: 12px; left: 12px; right: 12px; z-index: 10; background: #1e293b; color: #fff; padding: 14px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+    .status-panel.safe { background: #15803d; }
+    .status-panel.danger { background: #dc2626; }
+    .status-title { font-size: 16px; font-weight: 700; }
+    .status-sub { font-size: 13px; opacity: 0.9; margin-top: 4px; }
+    .zoom-controls { position: fixed; right: 14px; top: 100px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+    .zoom-btn { width: 42px; height: 42px; border-radius: 10px; background: #fff; font-size: 20px; font-weight: bold; border: none; box-shadow: 0 3px 8px rgba(0,0,0,0.2); cursor: pointer; }
+    .control-panel { position: fixed; bottom: 20px; left: 12px; right: 12px; z-index: 10; display: flex; gap: 8px; }
+    .btn { border: none; padding: 12px; border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.2); }
+    .btn-start { background: #2563eb; color: #fff; flex: 1; }
+    .btn-center { background: #fff; color: #0f172a; }
+    .btn-sim { background: #f59e0b; color: #0f172a; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="statusPanel" class="status-panel">
+    <div class="status-title" id="statusTitle">📍 Laluan Sedia</div>
+    <div class="status-sub" id="statusSub">Tekan "Mula Navigasi" atau "Uji Keluar".</div>
+  </div>
+  <div class="zoom-controls">
+    <button class="zoom-btn" onclick="zoom=Math.min(18,zoom+1);render()">+</button>
+    <button class="zoom-btn" onclick="zoom=Math.max(13,zoom-1);render()">−</button>
+  </div>
+  <div id="tileLayer"></div>
+  <canvas id="routeCanvas"></canvas>
+  <div class="control-panel">
+    <button class="btn btn-start" id="btnStart" onclick="startNav()">▶ Mula Navigasi</button>
+    <button class="btn btn-center" onclick="centerLat=4.8184;centerLng=100.7311;zoom=17;render()">🎯 Fokus</button>
+    <button class="btn btn-sim" onclick="updatePos(4.8205,100.7335,5)">🧪 Uji Keluar</button>
+  </div>
+
+  <script>
+    const route = [
+      [100.7312301,4.8181648],[100.7298861,4.8176768],[100.7297302,4.8177162],[100.7298598,4.8180160],
+      [100.7316188,4.8186440],[100.7315249,4.8188843],[100.7322048,4.8191573],[100.7325735,4.8187022],
+      [100.7312746,4.8181798]
+    ];
+    const c = document.getElementById('routeCanvas'), ctx = c.getContext('2d'), tileDiv = document.getElementById('tileLayer');
+    let zoom = 17, centerLat = 4.8184, centerLng = 100.7311, userPos = null, offRoute = false, lastAlert = 0;
+
+    function resize() { c.width = innerWidth; c.height = innerHeight; render(); }
+    onresize = resize;
+
+    function project(lat, lng, z) {
+      const s = 256 * Math.pow(2, z), sin = Math.sin(lat * Math.PI / 180);
+      return { x: ((lng + 180) / 360) * s, y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * s };
+    }
+
+    function toXY(lat, lng) {
+      const cw = project(centerLat, centerLng, zoom), pw = project(lat, lng, zoom);
+      return { x: innerWidth / 2 + (pw.x - cw.x), y: innerHeight / 2 + (pw.y - cw.y) };
+    }
+
+    // Tukar pelayan peta secara automatik jika disekat oleh rangkaian
+    function fallbackTile(img, z, x, y) {
+      const step = Number(img.dataset.step || 0) + 1;
+      img.dataset.step = step;
+      if (step === 1) img.src = `https://wikimedia.org{z}/${x}/${y}.png`;
+      else if (step === 2) img.src = `https://cartocdn.com{z}/${x}/${y}.png`;
+      else if (step === 3) img.src = `https://openstreetmap.de{z}/${x}/${y}.png`;
+      else img.style.display = 'none'; // Sembunyikan ikon gambar pecah jika tiada sambungan peta
+    }
+
+    function render() {
+      const w = innerWidth, h = innerHeight, cw = project(centerLat, centerLng, zoom);
+      let html = "";
+      for (let tx = Math.floor((cw.x - w/2)/256); tx <= Math.floor((cw.x + w/2)/256); tx++) {
+        for (let ty = Math.floor((cw.y - h/2)/256); ty <= Math.floor((cw.y + h/2)/256); ty++) {
+          const left = Math.round(w/2 + tx*256 - cw.x), top = Math.round(h/2 + ty*256 - cw.y);
+          html += `<img src="https://openstreetmap.org{zoom}/${tx}/${ty}.png" onerror="fallbackTile(this,${zoom},${tx},${ty})" style="left:${left}px;top:${top}px" />`;
+        }
+      }
+      tileDiv.innerHTML = html;
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.beginPath();
+      route.forEach((p, i) => { const s = toXY(p.at(1), p.at(0)); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 12; ctx.stroke();
+      ctx.strokeStyle = "#2563eb"; ctx.lineWidth = 7; ctx.stroke();
+
+      badge(toXY(route.at(0).at(1), route.at(0).at(0)), "#16a34a", "MULA / TAMAT");
+
+      if (userPos) {
+        const u = toXY(userPos.lat, userPos.lng);
+        ctx.beginPath(); ctx.arc(u.x, u.y, 16, 0, 6.29); ctx.fillStyle = offRoute ? "rgba(220,38,38,0.25)" : "rgba(37,99,235,0.25)"; ctx.fill();
+        ctx.beginPath(); ctx.arc(u.x, u.y, 8, 0, 6.29); ctx.fillStyle = offRoute ? "#dc2626" : "#2563eb"; ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke();
+      }
+    }
+
+    function badge(pt, col, txt) {
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 8, 0, 6.29); ctx.fillStyle = col; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke();
+      ctx.font = "bold 11px sans-serif"; const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = "#0f172a"; ctx.fillRect(pt.x - tw/2 - 5, pt.y - 26, tw + 10, 16);
+      ctx.fillStyle = "#fff"; ctx.fillText(txt, pt.x - tw/2, pt.y - 14);
+    }
+
+    let drag = false, lx = 0, ly = 0;
+    c.onpointerdown = e => { drag = true; lx = e.clientX; ly = e.clientY; };
+    onpointerup = () => drag = false;
+    c.onpointermove = e => {
+      if (!drag) return;
+      const s = 256 * Math.pow(2, zoom);
+      centerLng -= ((e.clientX - lx) / s) * 360;
+      centerLat += ((e.clientY - ly) / s) * 360 * Math.cos(centerLat * Math.PI / 180);
+      lx = e.clientX; ly = e.clientY; render();
+    };
+
+    function dist(lat, lng) {
+      let min = Infinity, R = 6371000, rad = x => x * Math.PI / 180;
+      for (let i = 0; i < route.length - 1; i++) {
+        let p1 = route.at(i), p2 = route.at(i + 1);
+        let y = rad(lat - p1.at(1))*R, x = rad(lng - p1.at(0))*R*Math.cos(rad(p1.at(1)));
+        let y2 = rad(p2.at(1) - p1.at(1))*R, x2 = rad(p2.at(0) - p1.at(0))*R*Math.cos(rad(p1.at(1)));
+        let len = x2*x2 + y2*y2, t = len ? Math.max(0, Math.min(1, (x*x2 + y*y2)/len)) : 0;
+        min = Math.min(min, Math.hypot(x - t*x2, y - t*y2));
+      }
+      return Math.round(min);
+    }
+
+    function startNav() {
+      if (!("geolocation" in navigator)) return alert("GPS tidak disokong.");
+      document.getElementById('btnStart').innerText = "🟢 Navigasi Aktif";
+      speak("Navigasi dimulakan. Ikut garisan biru.");
+      navigator.geolocation.watchPosition(
+        p => updatePos(p.coords.latitude, p.coords.longitude, Math.round(p.coords.accuracy)),
+        () => status("danger", "⚠️ Ralat GPS", "Sila aktifkan GPS telefon anda."),
+        { enableHighAccuracy: true }
+      );
+    }
+
+    function updatePos(lat, lng, acc) {
+      userPos = { lat, lng }; centerLat = lat; centerLng = lng;
+      const d = dist(lat, lng); offRoute = d > 25;
+      if (offRoute) {
+        status("danger", "🚨 ANDA TERSALAH LALUAN!", `Anda ${d}m dari laluan rasmi. Sila patah balik!`);
+        if (Date.now() - lastAlert > 8000) { lastAlert = Date.now(); if (navigator.vibrate) navigator.vibrate(500); speak("Amaran! Anda terkeluar dari laluan."); }
+      } else {
+        status("safe", "✅ Di Atas Laluan Rasmi", `Jarak: ${d}m • GPS: ±${acc}m`);
+      }
+      render();
+    }
+
+    function speak(t) { if ('speechSynthesis' in window) { speechSynthesis.cancel(); let u = new SpeechSynthesisUtterance(t); u.lang = 'ms-MY'; speechSynthesis.speak(u); } }
+    function status(t, h, s) { document.getElementById('statusPanel').className = `status-panel ${t}`; document.getElementById('statusTitle').innerText = h; document.getElementById('statusSub').innerText = s; }
+
+    resize();
+  </script>
+</body>
+</html>
